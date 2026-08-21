@@ -8,11 +8,21 @@ on:
 jobs:
   sweep:
     runs-on: ubuntu-latest
+    env:
+      CRON_SECRET: ${{ secrets.AUTOMATION_CRON_SECRET }}
+      BASE_URL: https://crm.amaronbatterystore.com
     steps:
       - name: Sweep stale flow runs
         run: |
-          curl -sS -f -H "x-cron-secret: ${{ secrets.AUTOMATION_CRON_SECRET }}" https://crm.amaronbatterystore.com/api/flows/cron
+          echo "secret length: ${#CRON_SECRET}"
+          code=$(curl -sS -o /tmp/flows.out -w "%{http_code}" -H "x-cron-secret: $CRON_SECRET" "$BASE_URL/api/flows/cron")
+          echo "HTTP $code"
+          cat /tmp/flows.out; echo
+          test "$code" = "200"
 
       - name: Run due automations
         run: |
-          curl -sS -f -H "x-cron-secret: ${{ secrets.AUTOMATION_CRON_SECRET }}" https://crm.amaronbatterystore.com/api/automations/cron
+          code=$(curl -sS -o /tmp/auto.out -w "%{http_code}" -H "x-cron-secret: $CRON_SECRET" "$BASE_URL/api/automations/cron")
+          echo "HTTP $code"
+          cat /tmp/auto.out; echo
+          test "$code" = "200"
