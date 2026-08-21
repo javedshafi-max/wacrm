@@ -1,0 +1,16 @@
+name: wacrm cron
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sweep stale flow runs
+        run: curl -sS -f -H "x-cron-secret: ${{ secrets.AUTOMATION_CRON_SECRET }}" https://crm.amaronbatterystore.com/api/flows/cron
+
+      - name: Run due automations
+        run: curl -sS -f -H "x-cron-secret: ${{ secrets.AUTOMATION_CRON_SECRET }}" https://crm.amaronbatterystore.com/api/automations/cron
