@@ -822,6 +822,40 @@ async function advanceCurrentNodeKey(
   return Array.isArray(data) && data.length > 0;
 }
 
+/**
+ * Is this conversation currently in a human's hands?
+ *
+ * `handoff` sets conversations.status='pending' and ends the flow run.
+ * Ending the run means the NEXT inbound finds no active run and falls
+ * through to trigger matching — so a keyword trigger would restart the
+ * whole menu on top of the agent mid-conversation. With 'contains'
+ * matching that is easy to hit: "hi" is a substring of "chahiye",
+ * "nahi", "thik hai".
+ *
+ * Gate on 'pending' only. 'closed' should still allow a fresh enquiry
+ * to start a new run, and 'open' is the normal bot-served state. An
+ * agent flipping the conversation back to open/closed in the inbox
+ * re-arms the bot.
+ */
+async function conversationIsWithHuman(
+  db: AdminClient,
+  conversationId: string | null | undefined,
+): Promise<boolean> {
+  if (!conversationId) return false;
+  const { data, error } = await db
+    .from("conversations")
+    .select("status")
+    .eq("id", conversationId)
+    .maybeSingle();
+  if (error) {
+    // Fail open: a lookup failure shouldn't strand the customer with
+    // no bot at all.
+    console.error("[flows] conversationIsWithHuman error:", error.message);
+    return false;
+  }
+  return (data as { status?: string } | null)?.status === "pending";
+}
+
 // ============================================================
 // Public entry point — the webhook calls this on every inbound.
 // ============================================================
@@ -858,6 +892,12 @@ export async function dispatchInboundToFlows(
       // in-memory. See loadAllNodes.
       const nodes = await loadAllNodes(db, activeRun.flow_id);
       return handleReplyForActiveRun(db, activeRun, input.message, nodes);
+    }
+
+    // Don't let a flow trigger interrupt a conversation an agent has
+    // already taken over (see conversationIsWithHuman).
+    if (await conversationIsWithHuman(db, input.conversationId)) {
+      return { consumed: false, outcome: "no_match" };
     }
 
     // No active run → look for a flow whose entry trigger matches.
