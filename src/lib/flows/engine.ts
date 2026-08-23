@@ -852,23 +852,54 @@ async function advanceCurrentNodeKey(
  * agent flipping the conversation back to open/closed in the inbox
  * re-arms the bot.
  */
+const HANDOFF_HOLD_MINUTES = 60;
+
 async function conversationIsWithHuman(
   db: AdminClient,
   conversationId: string | null | undefined,
 ): Promise<boolean> {
   if (!conversationId) return false;
+
   const { data, error } = await db
     .from("conversations")
     .select("status")
     .eq("id", conversationId)
     .maybeSingle();
   if (error) {
-    // Fail open: a lookup failure shouldn't strand the customer with
-    // no bot at all.
     console.error("[flows] conversationIsWithHuman error:", error.message);
     return false;
   }
-  return (data as { status?: string } | null)?.status === "pending";
+  if ((data as { status?: string } | null)?.status !== "pending") return false;
+
+  const cutoff = new Date(Date.now() - HANDOFF_HOLD_MINUTES * 60000).toISOString();
+
+  const { data: agentMsgs, error: agentErr } = await db
+    .from("messages")
+    .select("id")
+    .eq("conversation_id", conversationId)
+    .eq("sender_type", "agent")
+    .gte("created_at", cutoff)
+    .limit(1);
+  if (agentErr) {
+    console.error("[flows] conversationIsWithHuman agent lookup:", agentErr.message);
+    return true;
+  }
+  if ((agentMsgs ?? []).length > 0) return true;
+
+  const { data: runs, error: runErr } = await db
+    .from("flow_runs")
+    .select("ended_at")
+    .eq("conversation_id", conversationId)
+    .eq("end_reason", "handoff_node")
+    .order("ended_at", { ascending: false })
+    .limit(1);
+  if (runErr) {
+    console.error("[flows] conversationIsWithHuman handoff lookup:", runErr.message);
+    return true;
+  }
+  const endedAt = ((runs ?? [])[0] as { ended_at?: string } | undefined)?.ended_at;
+  if (!endedAt) return true;
+  return endedAt > cutoff;
 }
 
 // ============================================================
