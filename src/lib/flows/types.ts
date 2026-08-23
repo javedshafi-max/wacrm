@@ -173,6 +173,29 @@ export interface SetTagNodeConfig {
   next_node_key: string;
 }
 
+/**
+ * Sends a single call-to-action URL button (Meta's `cta_url`).
+ *
+ * Three constraints the builder must respect, all from Meta:
+ *   1. Exactly one button — cannot be mixed with reply buttons.
+ *   2. `url` must be https. tel: is rejected; real call buttons
+ *      exist only on approved templates.
+ *   3. Tapping it fires NO webhook, so this node AUTO-ADVANCES and
+ *      must never be the only route forward.
+ */
+export interface SendCtaUrlNodeConfig {
+  /** Body text shown above the button. */
+  text: string;
+  /** Button label (<= 20 chars per Meta). */
+  display_text: string;
+  /** https destination. */
+  url: string;
+  header_text?: string;
+  footer_text?: string;
+  /** Auto-advance target after the send lands at Meta. */
+  next_node_key: string;
+}
+
 // Terminal nodes carry no config — they just stop the run.
 export type EndNodeConfig = Record<string, never>;
 
@@ -190,6 +213,7 @@ export type FlowNodeConfig =
   | { node_type: "send_buttons"; config: SendButtonsNodeConfig }
   | { node_type: "send_list"; config: SendListNodeConfig }
   | { node_type: "send_media"; config: SendMediaNodeConfig }
+  | { node_type: "send_cta_url"; config: SendCtaUrlNodeConfig }
   | { node_type: "collect_input"; config: CollectInputNodeConfig }
   | { node_type: "condition"; config: ConditionNodeConfig }
   | { node_type: "set_tag"; config: SetTagNodeConfig }
