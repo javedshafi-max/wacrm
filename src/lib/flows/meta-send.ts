@@ -1,5 +1,6 @@
 import {
   sendInteractiveButtons,
+  sendInteractiveCtaUrl,
   sendInteractiveList,
   sendMediaMessage,
   sendTextMessage,
@@ -311,9 +312,37 @@ export async function engineSendInteractiveList(
   return sendInteractiveViaMeta({ ...args, kind: 'list' })
 }
 
+interface SendCtaUrlEngineArgs {
+  accountId: string
+  userId: string
+  conversationId: string
+  contactId: string
+  bodyText: string
+  /** Button label (<= 20 chars). */
+  displayText: string
+  /** https only — Meta rejects tel: and http. */
+  url: string
+  headerText?: string
+  footerText?: string
+}
+
+/**
+ * Send a single call-to-action URL button from the Flows engine.
+ *
+ * Unlike reply buttons, a CTA tap produces NO webhook — the flow
+ * cannot advance off this message. Treat it as decoration on top of
+ * a reply-button prompt, never as the only way forward.
+ */
+export async function engineSendCtaUrl(
+  args: SendCtaUrlEngineArgs,
+): Promise<{ whatsapp_message_id: string }> {
+  return sendInteractiveViaMeta({ ...args, kind: 'cta_url' })
+}
+
 type SendInput =
   | (SendInteractiveButtonsEngineArgs & { kind: 'buttons' })
   | (SendInteractiveListEngineArgs & { kind: 'list' })
+  | (SendCtaUrlEngineArgs & { kind: 'cta_url' })
 
 async function sendInteractiveViaMeta(
   input: SendInput,
@@ -357,6 +386,19 @@ async function sendInteractiveViaMeta(
         to: phone,
         bodyText: input.bodyText,
         buttons: input.buttons,
+        headerText: input.headerText,
+        footerText: input.footerText,
+      })
+      return r.messageId
+    }
+    if (input.kind === 'cta_url') {
+      const r = await sendInteractiveCtaUrl({
+        phoneNumberId: config.phone_number_id,
+        accessToken,
+        to: phone,
+        bodyText: input.bodyText,
+        displayText: input.displayText,
+        url: input.url,
         headerText: input.headerText,
         footerText: input.footerText,
       })
