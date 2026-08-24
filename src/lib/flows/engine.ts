@@ -665,7 +665,18 @@ async function advanceFromNodeKey(
     // Config-driven lead capture — see postLead.
     const leadAction = (node.config as { lead_action?: string }).lead_action;
     if (leadAction) {
-      await postLead(db, run, leadAction);
+      // One row per action per run. Without this, a customer who taps
+      // "Call Now" three times writes three identical rows and the sheet
+      // stops being a count of leads.
+      const posted = Array.isArray(run.vars?.leads_posted)
+        ? (run.vars.leads_posted as string[])
+        : [];
+      if (!posted.includes(leadAction)) {
+        await postLead(db, run, leadAction);
+        const newVars = { ...run.vars, leads_posted: [...posted, leadAction] };
+        await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+        run.vars = newVars;
+      }
     }
 
     if (node.node_type === "start") {
@@ -689,9 +700,27 @@ async function advanceFromNodeKey(
         // Remember the answer so a later lead post can name the vehicle
         // and battery. Capped: flow_runs.vars is read on every inbound.
         if (node.node_key.indexOf("ans_") === 0) {
+          // Also keep a SHORT form. The full answer is fine for the lead
+          // row, but the enquiry prompt needs to quote the selection back
+          // to the customer in one line, and interpolating 400 characters
+          // of battery codes and disclaimer would be unreadable.
+          const answerLines = cfg.text
+            .split("\n")
+            .map((l) => l.trim())
+            .filter(Boolean);
+          const vehicle = answerLines
+            .slice(0, 2)
+            .join(" · ")
+            .replace(/\*/g, "");
+          const codes = answerLines
+            .filter((l) => l.indexOf("\u{1F50B}") === 0)
+            .map((l) => l.replace("\u{1F50B}", "").trim())
+            .join(", ");
           const newVars = {
             ...run.vars,
             last_answer_text: cfg.text.slice(0, 400),
+            last_vehicle: vehicle.slice(0, 120),
+            last_battery: codes.slice(0, 160),
           };
           await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
           run.vars = newVars;
