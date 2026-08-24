@@ -539,6 +539,77 @@ function interpolateVars(template: string, vars: Record<string, unknown>): strin
   });
 }
 
+// ============================================================
+// Lead capture -> Google Sheet (Apps Script web app).
+//
+// Fires when the run enters a node carrying `lead_action` in its config,
+// which is how the three action buttons are tagged. Deliberately config-
+// driven rather than keyed on node names, so adding a fourth action is a
+// SQL update, not a deploy.
+//
+// Never throws: a Sheets outage must not cost the customer their reply.
+// Silent no-op when LEADS_WEBHOOK_URL is unset, so nothing changes for
+// accounts that have not configured it.
+// ============================================================
+
+async function postLead(
+  db: AdminClient,
+  run: FlowRunRow,
+  action: string,
+): Promise<void> {
+  const url = process.env.LEADS_WEBHOOK_URL;
+  if (!url) return;
+  try {
+    let phone = "";
+    let name = "";
+    if (run.contact_id) {
+      const { data } = await db
+        .from("contacts")
+        .select("phone, name")
+        .eq("id", run.contact_id)
+        .maybeSingle();
+      const c = data as { phone?: string; name?: string } | null;
+      phone = c?.phone ?? "";
+      name = c?.name ?? "";
+    }
+
+    // The answer text is the only place the chosen vehicle + battery exist
+    // in one piece; the run stores it as `last_answer_text` when an ans_
+    // node sends. Line 1 is the model, line 2 the brand, and the first
+    // battery line looks like "PRO - APBTZ4A".
+    const answer = String(run.vars?.last_answer_text ?? "");
+    const lines = answer.split("\n").map((l) => l.trim()).filter(Boolean);
+    const vehicle = lines.slice(0, 2).join(" - ").replace(/\*/g, "");
+    const codeLine = lines.find((l) => l.indexOf("\u{1F50B}") === 0) ?? "";
+    const battery_code = codeLine.split("\u2014").pop()?.trim() ?? "";
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        secret: process.env.LEADS_WEBHOOK_SECRET ?? "",
+        timestamp: new Date().toISOString(),
+        phone,
+        name,
+        vehicle,
+        battery_code,
+        action,
+        enquiry_text: String(run.vars?.enquiry_text ?? ""),
+        source: "wacrm-flow",
+        flow_run_id: run.id,
+      }),
+    });
+    if (!res.ok) {
+      console.error("[flows] postLead HTTP", res.status);
+    }
+  } catch (err) {
+    console.error(
+      "[flows] postLead failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 async function endRun(
   db: AdminClient,
   runId: string,
@@ -591,6 +662,12 @@ async function advanceFromNodeKey(
       node_type: node.node_type,
     });
 
+    // Config-driven lead capture — see postLead.
+    const leadAction = (node.config as { lead_action?: string }).lead_action;
+    if (leadAction) {
+      await postLead(db, run, leadAction);
+    }
+
     if (node.node_type === "start") {
       currentKey = (node.config as unknown as StartNodeConfig).next_node_key;
       continue;
@@ -609,6 +686,16 @@ async function advanceFromNodeKey(
           node_type: "send_message",
           whatsapp_message_id,
         });
+        // Remember the answer so a later lead post can name the vehicle
+        // and battery. Capped: flow_runs.vars is read on every inbound.
+        if (node.node_key.indexOf("ans_") === 0) {
+          const newVars = {
+            ...run.vars,
+            last_answer_text: cfg.text.slice(0, 400),
+          };
+          await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+          run.vars = newVars;
+        }
       } catch (err) {
         await logEvent(db, run.id, "error", node.node_key, {
           reason: "send_text_failed",
