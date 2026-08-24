@@ -580,8 +580,14 @@ async function postLead(
     const answer = String(run.vars?.last_answer_text ?? "");
     const lines = answer.split("\n").map((l) => l.trim()).filter(Boolean);
     const vehicle = lines.slice(0, 2).join(" - ").replace(/\*/g, "");
+    // Prefer the stored short form — it keeps the SERIES names
+    // ("FLO — 565106590, GO — 565106590"). Parsing the first battery
+    // line dropped them, so the sheet showed a bare part number and the
+    // counter staff could not tell which series was quoted.
     const codeLine = lines.find((l) => l.indexOf("\u{1F50B}") === 0) ?? "";
-    const battery_code = codeLine.split("\u2014").pop()?.trim() ?? "";
+    const battery_code =
+      String(run.vars?.last_battery ?? "").trim() ||
+      (codeLine.split("\u2014").pop()?.trim() ?? "");
 
     const res = await fetch(url, {
       method: "POST",
