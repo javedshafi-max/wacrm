@@ -54,6 +54,7 @@ import {
   type SendCtaUrlNodeConfig,
   type SendListNodeConfig,
   type SendMediaNodeConfig,
+  type MatchVehicleNodeConfig,
   type SendMessageNodeConfig,
   type SetTagNodeConfig,
   type StartNodeConfig,
@@ -128,7 +129,8 @@ export function isSuspending(node_type: string): boolean {
   return (
     node_type === "send_buttons" ||
     node_type === "send_list" ||
-    node_type === "collect_input"
+    node_type === "collect_input" ||
+    node_type === "match_vehicle"
   );
 }
 
@@ -616,6 +618,44 @@ async function postLead(
   }
 }
 
+// ============================================================
+// Free-text vehicle matching. The heavy lifting is a Postgres RPC
+// (bbh_search_fitments) so no rows are pulled into Node — the same
+// discipline that avoids the 1000-row PostgREST cap.
+// ============================================================
+
+interface FitmentHit {
+  answer_node_key: string;
+  brand: string;
+  variant: string;
+  fuel: string | null;
+  score: number;
+}
+
+async function searchFitments(
+  db: AdminClient,
+  accountId: string,
+  query: string,
+  limit: number,
+): Promise<FitmentHit[]> {
+  const { data, error } = await db.rpc("bbh_search_fitments", {
+    p_account: accountId,
+    p_query: query,
+    p_limit: limit,
+  });
+  if (error) {
+    console.error("[flows] searchFitments error:", error.message);
+    return [];
+  }
+  return (data ?? []) as FitmentHit[];
+}
+
+/** Row title for a hit, trimmed to Meta's 24-char cap. */
+function hitTitle(h: FitmentHit): string {
+  const t = h.fuel ? h.variant + " \u00B7 " + h.fuel : h.variant;
+  return t.length <= 24 ? t : t.slice(0, 23) + "\u2026";
+}
+
 async function endRun(
   db: AdminClient,
   runId: string,
@@ -803,6 +843,43 @@ async function advanceFromNodeKey(
       }
       currentKey = cfg.next_node_key;
       continue;
+    }
+    if (node.node_type === "match_vehicle") {
+      // Ask, then suspend. The search happens when the reply arrives,
+      // in handleReplyForActiveRun.
+      const cfgMv = node.config as unknown as MatchVehicleNodeConfig;
+      try {
+        const { whatsapp_message_id } = await engineSendText({
+          accountId: run.account_id,
+          userId: run.user_id,
+          conversationId: run.conversation_id!,
+          contactId: run.contact_id!,
+          text: interpolateVars(cfgMv.prompt_text, run.vars),
+        });
+        await logEvent(db, run.id, "message_sent", node.node_key, {
+          node_type: "match_vehicle",
+          whatsapp_message_id,
+        });
+      } catch (err) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "match_vehicle_prompt_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        await endRun(db, run.id, "failed", "match_vehicle_prompt_failed");
+        return { outcome: "completed" };
+      }
+      const advancedMv = await advanceCurrentNodeKey(
+        db,
+        run.id,
+        run.current_node_key,
+        node.node_key,
+      );
+      if (!advancedMv) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "lost_race_during_advance",
+        });
+      }
+      return { outcome: "advanced" };
     }
     if (node.node_type === "collect_input") {
       // Send the prompt and suspend. Customer's next TEXT reply will
