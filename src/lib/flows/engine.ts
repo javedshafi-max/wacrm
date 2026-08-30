@@ -1243,6 +1243,114 @@ async function handleReplyForActiveRun(
   //
   // Everything else falls through to the fallback policy below.
   let matched: string | null = null;
+
+  // ---- Free-text vehicle matching -------------------------------------
+  // Two ways in: the customer typed a description, or they tapped one of
+  // the candidates we offered. The candidate list is built at runtime, so
+  // the tap is resolved from `vars.match_options`, not from node config.
+  if (currentNode.node_type === "match_vehicle") {
+    const cfg = currentNode.config as unknown as MatchVehicleNodeConfig;
+    const minScore = cfg.min_score ?? 0.45;
+    const minGap = cfg.min_gap ?? 0.12;
+    const maxOptions = Math.min(cfg.max_options ?? 6, 9);
+
+    if (message.kind === "interactive_reply") {
+      const opts = (run.vars?.match_options ?? {}) as Record<string, string>;
+      const target = opts[message.reply_id];
+      if (target) {
+        const outcome = await advanceFromNodeKey(db, run, target, nodes);
+        return { consumed: true, flow_run_id: run.id, outcome: outcome.outcome };
+      }
+      // Unknown id — fall through to the fallback policy below.
+    } else if (message.kind === "text") {
+      const typed = message.text.trim();
+      const hits = await searchFitments(
+        db, run.account_id, typed, maxOptions);
+      const top = hits[0];
+      const second = hits[1];
+
+      // Keep what people actually type, so the wording of the prompt and
+      // the match thresholds can be judged on real messages later.
+      await logEvent(db, run.id, "node_entered", currentNode.node_key, {
+        matcher_query: typed.slice(0, 120),
+        matcher_hits: hits.length,
+        matcher_top: top ? top.answer_node_key : null,
+        matcher_top_score: top ? Number(top.score.toFixed(3)) : null,
+        matcher_gap: top && second
+          ? Number((top.score - second.score).toFixed(3))
+          : null,
+      });
+
+      if (cfg.var_key) {
+        const newVars = { ...run.vars, [cfg.var_key]: typed.slice(0, 200) };
+        await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+        run.vars = newVars;
+      }
+
+      // Confident: one hit clearly ahead of the rest. Answer directly.
+      const confident =
+        top &&
+        top.score >= minScore &&
+        (!second || top.score - second.score >= minGap);
+      if (confident) {
+        const outcome = await advanceFromNodeKey(
+          db, run, top.answer_node_key, nodes);
+        return { consumed: true, flow_run_id: run.id, outcome: outcome.outcome };
+      }
+
+      // Plausible but not certain: ask. Never guess between two year
+      // windows — that is the difference between an R and an L terminal.
+      const usable = hits.filter((h) => h.score >= minScore);
+      if (usable.length > 0) {
+        const rows = usable.slice(0, maxOptions).map((h, i) => ({
+          id: `mv_${i + 1}`,
+          title: hitTitle(h),
+          description: h.brand,
+        }));
+        rows.push({
+          id: "mv_menu",
+          title: "\u{1F524} None of these",
+          description: "Browse the full menu instead",
+        });
+        const optionMap: Record<string, string> = {};
+        usable.slice(0, maxOptions).forEach((h, i) => {
+          optionMap[`mv_${i + 1}`] = h.answer_node_key;
+        });
+        optionMap["mv_menu"] = cfg.on_no_match;
+
+        try {
+          await engineSendInteractiveList({
+            accountId: run.account_id,
+            userId: run.user_id,
+            conversationId: run.conversation_id!,
+            contactId: run.contact_id!,
+            bodyText: "I found a few matches — which one is yours?",
+            buttonLabel: "Pick vehicle",
+            sections: [{ rows }],
+          });
+        } catch (err) {
+          await logEvent(db, run.id, "error", currentNode.node_key, {
+            reason: "match_vehicle_list_failed",
+            detail: err instanceof Error ? err.message : String(err),
+          });
+        }
+        const newVars = { ...run.vars, match_options: optionMap };
+        await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+        run.vars = newVars;
+        return {
+          consumed: true,
+          flow_run_id: run.id,
+          outcome: "advanced",
+        };
+      }
+
+      // Nothing plausible — hand them the menu rather than a dead end.
+      const outcome = await advanceFromNodeKey(
+        db, run, cfg.on_no_match, nodes);
+      return { consumed: true, flow_run_id: run.id, outcome: outcome.outcome };
+    }
+  }
+  // ---------------------------------------------------------------------
   if (
     message.kind === "interactive_reply" &&
     (currentNode.node_type === "send_buttons" ||
