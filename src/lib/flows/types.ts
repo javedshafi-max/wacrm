@@ -196,6 +196,38 @@ export interface SendCtaUrlNodeConfig {
   next_node_key: string;
 }
 
+/**
+ * Free-text vehicle lookup. The customer types "swift 2013 petrol" and the
+ * runner searches `vehicle_fitments` via the `bbh_search_fitments` RPC
+ * instead of walking them through four menus.
+ *
+ * Behaviour, deliberately cautious — a wrong year window means a wrong
+ * terminal side and the customer collects a battery that will not fit:
+ *   - one clear winner  -> jump straight to that answer node
+ *   - several plausible -> offer them as a list and let the customer pick
+ *   - nothing           -> fall through to `on_no_match` (the full menu)
+ *
+ * The candidate list is built at runtime, so the reply cannot be resolved
+ * from this config the way send_list rows are. The runner stores the offered
+ * options on `flow_runs.vars.match_options` and resolves the tap from there.
+ */
+export interface MatchVehicleNodeConfig {
+  /** Question sent before waiting for the customer's text. */
+  prompt_text: string;
+  /** Where the raw text is kept, for logging what people actually type. */
+  var_key?: string;
+  /** Node to fall back to when nothing matches — normally the root menu. */
+  on_no_match: string;
+  /** Score below which a hit is not trusted at all. Default 0.45. */
+  min_score?: number;
+  /** How far ahead of the runner-up the top hit must be to skip the
+   *  question and answer directly. Default 0.12. */
+  min_gap?: number;
+  /** Rows to offer when asking. Meta caps a list at 10 including our
+   *  "show the full menu" escape row, so this is capped at 9. */
+  max_options?: number;
+}
+
 // Terminal nodes carry no config — they just stop the run.
 export type EndNodeConfig = Record<string, never>;
 
@@ -214,6 +246,7 @@ export type FlowNodeConfig =
   | { node_type: "send_list"; config: SendListNodeConfig }
   | { node_type: "send_media"; config: SendMediaNodeConfig }
   | { node_type: "send_cta_url"; config: SendCtaUrlNodeConfig }
+  | { node_type: "match_vehicle"; config: MatchVehicleNodeConfig }
   | { node_type: "collect_input"; config: CollectInputNodeConfig }
   | { node_type: "condition"; config: ConditionNodeConfig }
   | { node_type: "set_tag"; config: SetTagNodeConfig }
